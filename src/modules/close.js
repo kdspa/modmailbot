@@ -8,8 +8,8 @@ const utils = require("../utils");
 const threads = require("../data/threads");
 
 /**
- * @param {Eris.CommandClient} bot 
- * @param {SSE} sse 
+ * @param {Eris.CommandClient} bot
+ * @param {SSE} sse
  */
 module.exports = (bot, sse) => {
   /**
@@ -33,11 +33,7 @@ module.exports = (bot, sse) => {
   }
 
   async function scheduledCloseLoop() {
-    try {
-      await applyScheduledCloses();
-    } catch (e) {
-      console.error(e);
-    }
+    await applyScheduledCloses();
 
     setTimeout(scheduledCloseLoop, 2000);
   }
@@ -46,6 +42,14 @@ module.exports = (bot, sse) => {
 
   // Close a thread. Closing a thread saves a log of the channel's contents and then deletes the channel.
   threadUtils.addInboxServerCommand(bot, "close", async (msg, args, thread) => {
+    if (args[0] === "missed") {
+      const threadsShouldClosed = await threads.getThreadsThatShouldBeClosed();
+      if (threadsShouldClosed.length === 0) return bot.createMessage(msg.channel.id, "No threads that should be closed");
+      const threadList = threadsShouldClosed.map((t) => `${t.user_name} (${t.user_id}) - <#${t.channel_id}>`).join("\n");
+
+      bot.createMessage(msg.channel.id, threadList);
+    }
+
     if (! thread) return;
 
     // Timed close
@@ -57,6 +61,15 @@ module.exports = (bot, sse) => {
           thread.postSystemMessage("Cancelled scheduled closing");
         }
 
+        return;
+      } else if (args[0] === "status") {
+        let message;
+        if (thread.scheduled_close_at) {
+          message = `Thread scheduled to close\nClosing at ${thread.scheduled_close_at}\nClosing by ${thread.scheduled_close_name} (${thread.scheduled_close_id})`;
+        } else {
+          message = "Thread is not scheduled to close";
+        }
+        thread.postSystemMessage(message);
         return;
       }
 

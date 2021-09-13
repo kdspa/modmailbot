@@ -1,11 +1,13 @@
 const Eris = require("eris");
-const threadUtils = require("../threadUtils");
+const utils = require("../utils");
 
 /**
  * @param {Eris.CommandClient} bot
  */
 module.exports = bot => {
-  threadUtils.addInboxServerCommand(bot, "ping", async (msg) => {
-    msg.channel.createMessage("Pong!").then(m => m.edit(`Pong! \`${m.createdAt - msg.createdAt}ms\``));
+  bot.registerCommand("ping", async (msg) => {
+    if (! (await utils.messageIsOnInboxServer(msg))) return;
+    if (! utils.isStaff(msg.member)) return;
+    bot.createMessage(msg.channel.id, "Pong!").then(m => m.edit(`Pong! \`${m.createdAt - msg.createdAt}ms\``));
   });
 };

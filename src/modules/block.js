@@ -9,23 +9,21 @@ const utils = require("../utils");
  * @param {Eris.CommandClient} bot
  */
 module.exports = bot => {
-  const addInboxServerCommand = (...args) => threadUtils.addInboxServerCommand(bot, ...args);
-
-  addInboxServerCommand("block", async (msg, args, thread) => {
+  threadUtils.addInboxServerCommand(bot, "block", async (msg, args, thread) => {
     /**
-     * @param {String} userId 
+     * @param {Eris.User} user
      */
     async function block(user) {
       await blocked.block(user.id, `${user.username}#${user.discriminator}`, msg.author.id);
-      msg.channel.createMessage(`Blocked <@${user.id}> (id ${user.id}) from modmail`);
+      bot.createMessage(msg.channel.id, `Blocked <@${user.id}> (id ${user.id}) from modmail`);
     }
 
     let logText = "**Blocked:** ";
 
-    if (! thread && args.length > 0) {
+    if (! thread) {
       // User mention/id as argument
       const userId = utils.getUserMention(args.shift());
-      if (! userId) return;
+      if (! userId) return utils.postSystemMessageWithFallback(msg.channel, thread, "Please provide a user mention or ID!");
 
       const user = await bot.getRESTUser(userId).catch(() => null);
       if (! user) return utils.postSystemMessageWithFallback(msg.channel, thread, "User not found!");
@@ -41,7 +39,7 @@ module.exports = bot => {
       utils.postLog(logText);
 
       block(user);
-    } else if (thread) {
+    } else {
       const user = await bot.getRESTUser(thread.user_id);
       const reason = args.join(" ").trim();
       let isAnonymous = false;
@@ -69,18 +67,18 @@ module.exports = bot => {
     }
   });
 
-  addInboxServerCommand("unblock", async (msg, args, thread) => {
+  threadUtils.addInboxServerCommand(bot, "unblock", async (msg, args, thread) => {
     async function unblock(userId) {
       await blocked.unblock(userId);
-      msg.channel.createMessage(`Unblocked <@${userId}> (id ${userId}) from modmail`);
+      bot.createMessage(msg.channel.id, `Unblocked <@${userId}> (id ${userId}) from modmail`);
     }
 
     let logText = "**Unblocked:** ";
 
-    if (! thread && args.length > 0) {
+    if (! thread) {
       // User mention/id as argument
       const userId = utils.getUserMention(args.shift());
-      if (! userId) return;
+      if (! userId) return utils.postSystemMessageWithFallback(msg.channel, thread, "Please provide a user mention or ID!");
 
       const user = await bot.getRESTUser(userId).catch(() => null);
       if (! user) return utils.postSystemMessageWithFallback(msg.channel, thread, "User not found!");
@@ -97,7 +95,7 @@ module.exports = bot => {
       utils.postLog(logText);
 
       unblock(userId);
-    } else if (thread) {
+    } else {
       const reason = args.join(" ").trim();
 
       logText += `${thread.user_name} (${thread.user_id}) was unblocked`;

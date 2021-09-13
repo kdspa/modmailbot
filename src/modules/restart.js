@@ -1,14 +1,13 @@
 const Eris = require("eris");
-const threadUtils = require("../threadUtils");
 
 /**
  * @param {Eris.CommandClient} bot
  */
 module.exports = bot => {
-  threadUtils.addInboxServerCommand(bot, "restart", (msg) => {
-    msg.channel.createMessage("Restarting...").then(() => process.exit(1));
+  bot.registerCommand("restart", (msg) => {
+    bot.createMessage(msg.channel.id, "Restarting...").then(() => process.exit(1));
   }, {
-    requirements: {
+    requirements: { // TODO Check if promisable void
       custom: (msg) => msg.member.roles.some((r) => ["203040224597508096", "523021576128692239"].includes(r))
     }
   });

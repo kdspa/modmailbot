@@ -6,11 +6,11 @@ const mime = require("mime");
 const fs = require("fs");
 const https = require("https");
 const path = require("path");
-const superagent = require("superagent");
 const config = require("../config");
 const oauth2 = require("../oauth2");
 const threads = require("../data/threads");
 const attachments = require("../data/attachments");
+const constants = require("../data/constants");
 const knex = require("../knex");
 
 const THREAD_ID = /^[0-9a-f-]+$/;
@@ -25,21 +25,16 @@ function notfound(res) {
 }
 
 /**
- * @param {String} threadId
+ * @param {express.Response} res
  */
-async function getLogs (threadId) {
-  if (threadId.match(THREAD_ID) === null)
-    return;
-
-  const thread = await threads.findById(threadId);
-  if (! thread) return;
-  
-  return thread.getThreadMessages();
+function privateThread(res) {
+  res.status(401);
+  res.json({ message: "401: Private Thread" });
 }
 
 /**
  * @param {String} id
- * @param {String} desiredFilename 
+ * @param {String} desiredFilename
  */
 function getAttachment (id, desiredFilename) {
   if (! ID.test(id))
@@ -57,14 +52,22 @@ function getAttachment (id, desiredFilename) {
 }
 
 /**
+ * @param {express.Request} req
+ */
+async function viewPrivateThreads(req) {
+  const user = await oauth2.getAuthUser(req.cookies.token);
+  return oauth2.isDashAdmin(user);
+}
+
+/**
  * @param {Eris.CommandClient} bot
  * @param {SSE} sse
  */
 module.exports = (bot, sse) => {
   const app = express();
-  
+
   app.use(cookieParser());
-  
+
   app.get("/attachments/:id/:name", async (req, res) => {
     let [mime, attachment] = getAttachment(req.params.id, req.params.name) || [];
 
@@ -92,20 +95,37 @@ module.exports = (bot, sse) => {
      */
     let { limit: lim, page, user, sort_by, reverse } = req.query;
     let limit = parseInt(lim) || 50;
+
     if (limit < 1) limit = 1;
     if (limit > 100) limit = 100;
+
     page = parseInt(page) || 0;
     reverse = reverse != null;
+
     let q = knex("threads");
+
+    // Send necessary threads only
+
+    const viewAll = await viewPrivateThreads(req);
+
+    if (! viewAll) {
+      q.where("isPrivate", 0);
+      q.where("status", constants.THREAD_STATUS.CLOSED);
+    }
+
     if (user)
       q.where("user_id", user);
     else
       q.select("*");
+
     let total = (await q.clone().count())[0]["count(*)"];
+    let offset = page * limit;
+
     if (sort_by)
       q.orderBy(sort_by, reverse ? "asc" : "desc");
+
     q.orderBy("created_at", reverse ? "desc" : "asc");
-    let offset = page * limit;
+
     res.json({
       total: total,
       threads: await q.limit(limit).offset(offset)
@@ -116,6 +136,14 @@ module.exports = (bot, sse) => {
     if (! thread)
       return notfound(res);
 
+    if (thread.isPrivate) {
+      const viewAll = await viewPrivateThreads(req);
+
+      if (! viewAll) {
+        return privateThread(res);
+      }
+    }
+
     res.json(thread);
   });
   app.get("/users", async (req, res) => {
@@ -124,50 +152,45 @@ module.exports = (bot, sse) => {
     res.json(users.map(u => ({ id: u.user_id, name: u.user_name })));
   });
   app.get("/logs/:id", async (req, res) => {
-    let logs = await getLogs(req.params.id);
-    if (! logs)
+    const threadId = req.params.id;
+    if (threadId.match(THREAD_ID) === null)
       return notfound(res);
+
+    const thread = await threads.findById(threadId);
+    if (! thread)
+      return notfound(res);
+
+    if (thread.isPrivate) {
+      const viewAll = await viewPrivateThreads(req);
+
+      if (! viewAll) {
+        return privateThread(res);
+      }
+    }
+
+    const logs = await thread.getThreadMessages();
 
     res.json(logs);
   });
   app.get("/avatars/:id", async (req, res) => {
-    superagent.get(`https://discordapp.com/api/users/${req.params.id}`)
-    .set("Authorization", bot.token)
-    .end((error, response) => {
-      if (error) {
-        if (error.status === 404) {
-          res.status(400);
-          res.send("<pre>400 Bad Request</pre>");
-        } else {
-          res.status(500);
-          console.log(error);  
-          res.send(`<pre>500 Server Error: ${error}</pre>`);
-        }
+    const user = bot.users.get(req.params.id) || await bot.getRESTUser(req.params.id).catch(
+      /** @param {import('eris').DiscordRESTError | import('eris').DiscordHTTPError} e */
+      (e) => {
+      if (e.code === 404 || e.code === 10013) {
+        res.status(400).send("<pre>400 Bad Request</pre>");
       } else {
-        res.set("Cache-Control", "max-age=3600");
-        let user = response.body;
-        if (user.avatar) {
-          let format = req.query.format || "png";
-          if (format === "gif" && ! user.avatar.startsWith("a_"))
-            format = "png";
-          res.redirect(`https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.${format}`);
-        } else {
-          let defaultAvatars = [
-            "6debd47ed13483642cf09e832ed0bc1b",
-            "322c936a8c8be1b803cd94861bdfa868",
-            "dd4dbc0016779df1378e7812eabaa04d",
-            "0e291f67c9274a1abdddeb3fd919cbaa",
-            "1cbd08c76f8af6dddce02c5138971129"
-          ];
-          let avatar = defaultAvatars[user.discriminator % defaultAvatars.length];
-          res.redirect(`https://discordapp.com/assets/${avatar}.png`);
-        }
+        process.emit("unhandledRejection", e);
+        res.status(500).send(`<pre>500 Server Error: ${e}</pre>`);
       }
-    }); 
+      return null;
+    });
+    if (! user) return;
+
+    res.set("Cache-Control", "max-age=3600").redirect(user.avatarURL);
   });
-  
+
   app.get("/stream", sse.init);
-  
+
   if (config.https) {
     const httpsServer = https.createServer({
       key: fs.readFileSync(config.https.privateKey, "utf8"),

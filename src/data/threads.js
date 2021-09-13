@@ -1,15 +1,12 @@
 const transliterate = require("transliteration");
 const moment = require("moment");
 const uuid = require("uuid");
-const humanizeDuration = require("humanize-duration");
 const Eris = require("eris");
 
 const knex = require("../knex");
 const config = require("../config");
 const utils = require("../utils");
-const notes = require("../data/notes");
 
-const Thread = require("./Thread");
 const { THREAD_STATUS } = require("./constants");
 
 /**
@@ -61,13 +58,7 @@ async function createNewThreadForUser(user, quiet = false) {
   console.log(`[NOTE] Creating new thread channel ${channelName}`);
 
   // Attempt to create the inbox channel for this thread
-  let createdChannel;
-  try {
-    createdChannel = await utils.getInboxGuild().then(g => g.createChannel(channelName, null, "New ModMail thread", config.newThreadCategoryId));
-  } catch (err) {
-    console.error(`Error creating modmail channel for ${user.username}#${user.discriminator}!`);
-    throw err;
-  }
+  const createdChannel = await utils.getInboxGuild().then(g => g.createChannel(channelName, 0, { reason: "New ModMail thread", parentID: config.newThreadCategoryId }));
 
   // Save the new thread in the database
   const newThreadId = await createThreadInDB({
@@ -85,41 +76,16 @@ async function createNewThreadForUser(user, quiet = false) {
     if (config.mentionRole) {
       await newThread.postNonLogMessage({
         content: `${utils.getInboxMention()}New modmail thread (${newThread.user_name})`,
-        allowedMentions: { everyone: false }
       });
     }
-    
+
     // Send auto-reply to the user
     if (config.responseMessage) {
       newThread.postToUser(config.responseMessage);
     }
   }
 
-  // Post some info to the beginning of the new thread
-  const now = Date.now();
-
-  const member = await utils.getMainGuild().then((g) => g.getRESTMember(user.id), () => null);
-  if (! member) console.log(`[INFO] Member ${user.id} not found in main guild ${config.mainGuildId}`);
-
-  let mainGuildNickname = member && member.nick || user.username;
-    
-  const userLogCount = await getClosedThreadCountByUserId(user.id);
-  const accountAge = humanizeDuration(now - user.createdAt, {largest: 2});
-  let memberFor;
-  if (member) {
-    memberFor = humanizeDuration(now - member.joinedAt, {largest: 2});
-  }
-  let displayNote;
-  let userNotes = await notes.get(user.id);
-  if (userNotes && userNotes.length) {
-    let note = userNotes.slice(-1)[0];
-    displayNote = `**Note [${userNotes.length}]:** ${note.note} - [${note.created_at}] (${note.created_by_name})\n`;
-  } else
-    displayNote = "";
-  const infoHeader = `NAME **${mainGuildNickname}**\nMENTION ${user.mention}\nID **${user.id}**\nACCOUNT AGE **${accountAge}**\n`
-    + `MEMBER FOR **${memberFor}**\nLOGS **${userLogCount}**\n${displayNote}────────────────────────────────`;
-
-  await newThread.postSystemMessage(infoHeader);
+  await newThread.sendThreadInfo().catch((e) => process.emit("unhandledRejection", e));
 
   // Return the thread
   return newThread;
@@ -244,3 +210,5 @@ module.exports = {
   createThreadInDB,
   getClosedThreadCountByUserId,
 };
+
+const Thread = require("./Thread");

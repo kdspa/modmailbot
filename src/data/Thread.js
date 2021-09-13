@@ -1,16 +1,19 @@
 const moment = require("moment");
 const Eris = require("eris");
 const SSE = require("express-sse");
+const humanizeDuration = require("humanize-duration");
 
 const bot = require("../bot");
 const knex = require("../knex");
 const utils = require("../utils");
 const config = require("../config");
 const attachments = require("./attachments");
+const threads = require("./threads");
 
 const ThreadMessage = require("./ThreadMessage");
 
 const {THREAD_MESSAGE_TYPE, THREAD_STATUS} = require("./constants");
+const notes = require("./notes");
 
 /**
  * @property {String} id
@@ -22,6 +25,8 @@ const {THREAD_MESSAGE_TYPE, THREAD_STATUS} = require("./constants");
  * @property {String} scheduled_close_at
  * @property {String} scheduled_close_id
  * @property {String} scheduled_close_name
+ * @property {String?} alert_users
+ * @property {Object?} staff_role_overrides
  * @property {String} created_at
  */
 class Thread {
@@ -30,7 +35,8 @@ class Thread {
   }
 
   /**
-   * @param {Eris.Message} msg
+   * @param {Eris.Member} moderator
+   * @param {String} text
    * @param {Eris.Attachment[]} [replyAttachments=[]]
    * @param {Boolean} [isAnonymous=false]
    * @param {SSE} [sse]
@@ -39,7 +45,7 @@ class Thread {
   async replyToUser(moderator, text, replyAttachments = [], isAnonymous = false, sse) {
     // Username to reply with
     let modUsername, logModUsername;
-    const mainRole = utils.getMainRole(moderator);
+    const mainRole = this.getMainRole(moderator);
 
     if (isAnonymous) {
       modUsername = (mainRole ? mainRole.name : "Staff");
@@ -83,6 +89,7 @@ class Thread {
 
     // Send the reply to the modmail thread
     const threadMessage = await this.postToThreadChannel(threadContent, files);
+    if (! threadMessage) return; // This will be undefined if the channel is deleted
 
     // Add the message to the database
     await this.addThreadMessageToDB({
@@ -114,12 +121,12 @@ class Thread {
   async sendCommandToUser(moderator, message, command, isAnonymous = false) {
     // Username to reply with
     let modUsername, logModUsername;
-    const mainRole = utils.getMainRole(moderator);
+    const mainRole = this.getMainRole(moderator);
     const text = `[Command Help: ${command.name}]`;
 
     if (isAnonymous) {
-      modUsername = (mainRole ? mainRole.name : "Moderator");
-      logModUsername = `(Anonymous) (${moderator.user.username}) ${mainRole ? mainRole.name : "Moderator"}`;
+      modUsername = (mainRole ? mainRole.name : "Staff");
+      logModUsername = `(Anonymous) (${moderator.user.username}) ${mainRole ? mainRole.name : "Staff"}`;
     } else {
       const name = (config.useNicknames ? moderator.nick || moderator.user.username : moderator.user.username);
       modUsername = (mainRole ? `(${mainRole.name}) ${name}` : name);
@@ -146,6 +153,7 @@ class Thread {
 
     // Send the reply to the modmail thread
     const threadMessage = await this.postToThreadChannel(threadContent);
+    if (! threadMessage) return; // This will be undefined if the channel is deleted
 
     // Add the message to the database
     await this.addThreadMessageToDB({
@@ -204,7 +212,12 @@ class Thread {
       }
     }
 
-    const threadMessge = await this.postToThreadChannel(threadContent, attachmentFiles);
+    const threadMessage = await this.postToThreadChannel(threadContent, attachmentFiles);
+    if (! threadMessage) {
+      await bot.createMessage(msg.channel.id, "The current thread was automatically closed due to an internal error. Please send another message to open a new thread.");
+      return;
+    }
+
     await this.addThreadMessageToDB({
       message_type: THREAD_MESSAGE_TYPE.FROM_USER,
       user_id: this.user_id,
@@ -212,8 +225,19 @@ class Thread {
       body: logContent,
       is_anonymous: 0,
       dm_message_id: msg.id,
-      thread_message_id: threadMessge.id,
+      thread_message_id: threadMessage.id,
     }, sse);
+
+    if (this.alert_users) {
+      const alerts = this.alert_users.split(", ")
+        .filter(id => id !== this.scheduled_close_id)
+        .map((id, i, arr) => (i == 0 ? "" : (i == arr.length - 1 ? " and " : ", ")) + `<@${id}>`)
+        .join("");
+
+      if (alerts.length) {
+        this.postSystemMessage(`${alerts}, there is a new message from **${this.user_name}**!`);
+      }
+    }
 
     if (this.scheduled_close_at) {
       const now = moment();
@@ -225,17 +249,15 @@ class Thread {
         await this.cancelScheduledClose();
         systemMessage = await this.postSystemMessage({
           content: `<@!${this.scheduled_close_id}> Thread that was scheduled to be closed got a new reply. Cancelling.`,
-          allowedMentions: { everyone: false }
         });
       } else {
         systemMessage = await this.postSystemMessage({
           content: `<@!${this.scheduled_close_id}> The thread was updated, use \`!close cancel\` if you would like to cancel.`,
-          allowedMentions: { everyone: false }
         });
       }
 
       if (systemMessage) {
-        setTimeout(() => systemMessage.delete(), 30000);
+        setTimeout(() => systemMessage.delete().catch(() => null), 30000);
       }
     }
   }
@@ -248,7 +270,7 @@ class Thread {
   }
 
   /**
-   * @param {String} text
+   * @param {Eris.MessageContent} text
    * @param {Eris.MessageFile|Eris.MessageFile[]} [file=null]
    * @returns {Promise<Eris.Message<Eris.PrivateChannel>>}
    * @throws Error
@@ -271,12 +293,12 @@ class Thread {
    */
   async postToThreadChannel(content, file) {
     try {
-      return bot.createMessage(this.channel_id, content, file);
+      return await bot.createMessage(this.channel_id, content, file);
     } catch (e) {
       // Channel not found
       if (e.code === 10003) {
         console.log(`[INFO] Auto-closing thread with ${this.user_name} because the channel no longer exists`);
-        this.close(bot.user);
+        this.close(bot.user, true);
       } else {
         throw e;
       }
@@ -290,11 +312,12 @@ class Thread {
    */
   async postSystemMessage(text, file) {
     const msg = await this.postToThreadChannel(text, file);
+    if (! msg) return; // This will be undefined if the channel is deleted
     await this.addThreadMessageToDB({
       message_type: THREAD_MESSAGE_TYPE.SYSTEM,
       user_id: null,
       user_name: "",
-      body: typeof text === "string" ? text : text.content,
+      body: typeof text === "string" ? text : (text.content + text.embed ? " <embed>" : "").trim(),
       is_anonymous: 0,
       dm_message_id: msg.id,
       thread_message_id: msg.id,
@@ -311,6 +334,54 @@ class Thread {
    */
   async postNonLogMessage(content, file) {
     await this.postToThreadChannel(content, file);
+  }
+
+  async sendThreadInfo() {
+    const now = Date.now();
+    const user = bot.users.get(this.user_id);
+    const [
+      member,
+      userLogCount,
+      userNotes
+    ] = await Promise.all([
+      utils.getMainGuild().then((g) => g.getRESTMember(user.id)).catch(() => null),
+      threads.getClosedThreadCountByUserId(user.id),
+      notes.get(user.id),
+    ]);
+
+    const mainGuildNickname = member && member.nick && `(${member.nick})`;
+    const accountAge = humanizeDuration(now - user.createdAt, {largest: 2});
+    const memberFor = member ? humanizeDuration(now - member.joinedAt, {largest: 2}) : "UNAVAILABLE";
+    const roles = member && member.roles.map((r) => member.guild.roles.get(r)).sort((a, b) => b.position - a.position);
+    const roleList = roles ? roles.map((r) => r.name).join(", ") || "NONE" : "UNAVAILABLE";
+    const coloredRoles = roles && roles.filter((r) => r.color !== 0) || [];
+    const highestColor = coloredRoles[0] && coloredRoles[0].color;
+
+    let displayNote = "None";
+    if (userNotes && userNotes.length) {
+      const note = userNotes[userNotes.length - 1];
+      displayNote = `${note.note} - [${note.created_at}] (${note.created_by_name})`;
+    }
+
+    const fields = [
+      {name: "User", value: `${user.username}#${user.discriminator} ${mainGuildNickname || ""}`, inline: true},
+      {name: "Account age", value: accountAge, inline: true},
+      {name: "Member for", value: memberFor, inline: true},
+      {name: "Thread ID", value: this.id, inline: true},
+      {name: "Logs", value: `${userLogCount}`, inline: true},
+      {name: `Last note (${userNotes.length})`, value: displayNote, inline: false},
+      {name: `Roles (${roles && roles.length || 0})`, value: roleList, inline: false},
+    ];
+
+    await this.postSystemMessage({
+      content: user.mention,
+      embed: {
+        fields,
+        footer: {text: member.id},
+        timestamp: new Date(),
+        color: highestColor || 0x337FD5,
+      }
+    });
   }
 
   /**
@@ -369,6 +440,13 @@ class Thread {
       .first();
   }
 
+  async getThreadMessageFromThread(msgID) {
+    return knex("thread_messages")
+      .where("thread_id", this.id)
+      .where("thread_message_id", msgID)
+      .first();
+  }
+
   /**
    * @param {String} messageId
    * @returns {Promise<void>}
@@ -393,7 +471,7 @@ class Thread {
       ...data
     };
     await knex("thread_messages").insert(threadMessage);
-    
+
     if (sse) {
       sse.send({
         message: threadMessage
@@ -415,6 +493,42 @@ class Thread {
   }
 
   /**
+   * @param {String} userId
+   * @param {Boolean} status
+   * @returns {Promise<void>}
+   */
+  async alertStatus(userId, status) {
+    let alerts = await knex("threads")
+      .where("id", this.id)
+      .select("alert_users")
+      .first();
+
+    alerts = (alerts.alert_users && alerts.alert_users.split(", ")) || [];
+
+    if (! alerts.includes(userId) && status === true) {
+      alerts.push(userId);
+    } else if (status === false) {
+      const index = alerts.indexOf(userId);
+
+      if (index > -1) {
+        alerts.splice(index, 1);
+      }
+    }
+
+    if (alerts.length > 0) {
+      alerts = alerts.join(", ");
+    } else {
+      alerts = null;
+    }
+
+    await knex("threads")
+      .where("id", this.id)
+      .update({
+        alert_users: alerts
+      });
+  }
+
+  /**
    * @param {Eris.User|{ discriminator: string; id: string; username: string; }} author
    * @param {Boolean} [silent=false]
    * @param {SSE} [sse]
@@ -425,8 +539,8 @@ class Thread {
       console.log(`Closing thread ${this.id}`);
       await this.postToThreadChannel("Closing thread...");
     }
-    
-    if(! author) {
+
+    if (! author) {
       let newThread = await knex("threads")
         .where("id", this.id)
         .first();
@@ -443,7 +557,9 @@ class Thread {
         status: THREAD_STATUS.CLOSED,
         scheduled_close_at: moment().utc().format("YYYY-MM-DD HH:mm:ss"),
         scheduled_close_id: author.id,
-        scheduled_close_name: `${author.username}#${author.discriminator}`
+        scheduled_close_name: `${author.username}#${author.discriminator}`,
+        alert_users: null,
+        staff_role_overrides: null
       });
 
     if (sse)
@@ -459,7 +575,14 @@ class Thread {
      */
     const channel = bot.getChannel(this.channel_id);
     if (channel) {
+      if (this.isPrivate && channel.parentID == config.newThreadCategoryId) {
+        this.makePublic();
+      } else if (! this.isPrivate && channel.parentID != config.newThreadCategoryId) {
+        this.makePrivate();
+      }
+
       console.log(`Deleting channel ${this.channel_id}`);
+
       await channel.delete("Thread closed");
     }
   }
@@ -512,6 +635,107 @@ class Thread {
       .update({
         status: THREAD_STATUS.OPEN
       });
+  }
+
+  /**
+   * @param {String} userId
+   * @param {String} roleId
+   * @returns {Promise<void>}
+   */
+  async setStaffRoleOverride(userId, roleId) {
+    let overrides = await knex("threads")
+      .where("id", this.id)
+      .select("staff_role_overrides")
+      .first();
+
+    if (overrides.staff_role_overrides) {
+      overrides = JSON.parse(overrides.staff_role_overrides);
+    } else {
+      overrides = {};
+    }
+
+    overrides[userId] = roleId;
+
+    await knex("threads")
+      .where("id", this.id)
+      .update({
+        staff_role_overrides: JSON.stringify(overrides)
+      });
+  }
+
+  /**
+   * @param {String} userId
+   * @returns {Promise<void>}
+   */
+  async deleteStaffRoleOverride(userId) {
+    let overrides = await knex("threads")
+      .where("id", this.id)
+      .select("staff_role_overrides")
+      .first();
+
+    if (overrides.staff_role_overrides) {
+      overrides = JSON.parse(overrides.staff_role_overrides);
+
+      if (overrides[userId]) {
+        delete overrides[userId];
+        await knex("threads")
+          .where("id", this.id)
+          .update({
+            staff_role_overrides: JSON.stringify(overrides)
+          });
+      }
+    }
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  async makePrivate() {
+    return await knex("threads")
+      .where("id", this.id)
+      .update({
+        isPrivate: true
+      });
+  }
+
+  /**
+   * @returns {Promise<void>}
+   */
+  async makePublic() {
+    return await knex("threads")
+      .where("id", this.id)
+      .update({
+        isPrivate: false
+      });
+  }
+
+  /**
+   * @param {String} userId
+   * @returns {String?}
+   */
+  getStaffRoleOverride(userId) {
+    if (this.staff_role_overrides) {
+      return JSON.parse(this.staff_role_overrides)[userId];
+    }
+  }
+
+  /**
+   * @param {Eris.Member} member
+   * @returns {String?}
+   */
+  getMainRole(member) {
+    let role = this.getStaffRoleOverride(member.id);
+
+    if (role) {
+      const guild = member.guild;
+      const override = guild && guild.roles && guild.roles.get(role);
+
+      if (override) {
+        return override;
+      }
+    }
+
+    return utils.getMainRole(member);
   }
 
   /**

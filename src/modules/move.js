@@ -1,5 +1,6 @@
 const Eris = require("eris");
 const config = require("../config");
+const utils = require("../utils");
 const threadUtils = require("../threadUtils");
 
 /**
@@ -30,14 +31,12 @@ module.exports = bot => {
     if (! overwrites) return;
     for (let o of overwrites.values()) {
       if (o.id === channel.guild.id) continue;
-      // @ts-ignore #993
-      channel.editPermission(o.id, o.allow || null, o.deny || null, o.type, "Moving modmail thread.");
+      channel.editPermission(o.id, o.allow, o.deny, o.type, "Moving modmail thread.");
     }
   }
 
   threadUtils.addInboxServerCommand(bot, "move", async (msg, args, thread) => {
     if (! config.allowMove) return;
-
     if (! thread) return;
 
     const searchStr = args[0];
@@ -48,7 +47,7 @@ module.exports = bot => {
     /**
      * @type {Eris.CategoryChannel[]}
      */
-    const categories = msg.channel.guild.channels.filter(c => {
+    const categories = bot.guilds.get(msg.guildID).channels.filter(c => {
       if (config.allowedCategories && config.allowedCategories.length) {
         if (config.allowedCategories.find(id => id === c.id)) {
           return true;
@@ -99,15 +98,37 @@ module.exports = bot => {
     /**
      * @type {Eris.GuildTextableChannel}
      */
-    const threadChannel = msg.channel.guild.channels.get(thread.channel_id);
+    const threadChannel = bot.guilds.get(msg.guildID).channels.get(thread.channel_id);
 
     await clearThreadOverwrites(threadChannel);
 
     bot.editChannel(thread.channel_id, {
       parentID: targetCategory.id
-    }).then(() => syncThreadChannel(threadChannel, targetCategory));
+    }).then(() => {
+      syncThreadChannel(threadChannel, targetCategory);
 
-    thread.postSystemMessage(`Thread moved to ${targetCategory.name.toUpperCase()}`);
+      // Make thread private/unprivate
+
+      if (targetCategory.id !== config.newThreadCategoryId) {
+        thread.makePrivate();
+
+        // Ping Admins if necessary
+
+        if (config.adminMentionRole && ! utils.isAdmin(msg.member)) {
+          bot.createMessage(threadChannel.id, {
+            content: `<@&${config.adminMentionRole}>, a thread has been moved.`,
+            allowedMentions: {
+              roles: true
+            }
+          });
+        }
+    } else {
+        thread.makePublic();
+      }
+    }).catch((err) => {
+      utils.handleError(err);
+      return thread.postSystemMessage("Something went wrong while trying to move this thread.");
+    });
   });
 
   bot.registerCommandAlias("m", "move");

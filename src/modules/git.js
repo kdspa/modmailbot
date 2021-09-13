@@ -1,7 +1,6 @@
 const Eris = require("eris");
 
 const childProcess = require("child_process");
-const threadUtils = require("../threadUtils");
 
 const GIT_VALIDATOR = /^git[\w\d\s-"'/.]+$/;
 
@@ -13,7 +12,7 @@ async function exec(command, options) { // My very elaborate asynchronous stream
   return new Promise((res, rej) => {
     let output = "";
     /**
-     * @param {Buffer|String} data 
+     * @param {Buffer|String} data
      */
     const writeFunction = (data) => {
       output += `${data}`; // Buffer.toString()
@@ -38,17 +37,17 @@ async function exec(command, options) { // My very elaborate asynchronous stream
  * @param {Eris.CommandClient} bot
  */
 module.exports = bot => {
-  threadUtils.addInboxServerCommand(bot, "git", async (msg, args) => {
+  bot.registerCommand("git", async (msg, args) => {
     const command = `git ${args.join(" ")}`;
-    if (! GIT_VALIDATOR.test(command)) return msg.channel.createMessage("no.");
+    if (! GIT_VALIDATOR.test(command)) return bot.createMessage(msg.channel.id, "no.");
 
-    const message = await msg.channel.createMessage("Running...");
+    const message = await bot.createMessage(msg.channel.id, "Running...");
     exec(command).then(
       (res) => message.edit(`\`\`\`\n${res}\n\`\`\``),
       (rej) => message.edit(`\`\`\`\n${rej.message}\n\`\`\``)
     );
   }, {
-    requirements: {
+    requirements: { // TODO Check if the return type should be Promisable void
       custom: (msg) => msg.member.roles.some((r) => ["203040224597508096", "523021576128692239"].includes(r))
     }
   });

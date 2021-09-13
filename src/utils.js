@@ -28,14 +28,13 @@ async function getInboxGuild() {
  */
 async function getMainGuild() {
   if (! mainGuild) mainGuild = bot.guilds.find(g => g.id === config.mainGuildId);
-  if (! inboxGuild) inboxGuild = await bot.getRESTGuild(config.mainGuildId).catch(() => {});
+  if (! mainGuild) mainGuild = await bot.getRESTGuild(config.mainGuildId).catch(() => {});
   if (! mainGuild) console.warn("[WARN] The bot is not on the main server! If this is intentional, you can ignore this warning.");
   return mainGuild;
 }
 
 /**
  * Returns the designated log channel, or the default channel if none is set
- * @param bot
  * @returns {Promise<Eris.TextChannel>}
  */
 async function getLogChannel() {
@@ -48,7 +47,9 @@ async function getLogChannel() {
   }
 
   if (! logChannel) {
-    throw new BotError("Log channel not found!");
+    logChannel = await bot.getRESTChannel(config.logChannelId || inboxGuild.id).catch(() => {
+      throw new BotError("Log channel not found!");
+    });
   }
 
   return logChannel;
@@ -61,11 +62,18 @@ function postLog(...args) {
 function postError(str) {
   getLogChannel().then(c => c.createMessage({
     content: `${getInboxMention()}**Error:** ${str.trim()}`,
-    disableEveryone: false
+    allowedMentions: {
+      everyone: false
+    }
   }));
 }
 
 function handleError(error) {
+  if (! config.errorWebhookId || ! config.errorWebhookToken) {
+    getLogChannel().then(c => c.createMessage("**Error:**\n"
+    + `\`\`\`js\n${error.stack}\n\`\`\``));
+    return;
+  }
   bot.executeWebhook(config.errorWebhookId, config.errorWebhookToken, {
     content: "**Error:**\n"
       + `\`\`\`js\n${error.stack}\n\`\`\``
@@ -76,35 +84,46 @@ function handleError(error) {
 }
 
 /**
+ * Returns whether the given member has an administrator role
+ * @param {Eris.Member} member
+ * @returns {boolean}
+ */
+function isAdmin(member) {
+  if (! config.inboxAdminRoleIDs.length) return false;
+  if (! member) return false;
+  return member.roles.some((r) => config.inboxAdminRoleIDs.includes(r));
+}
+
+/**
  * Returns whether the given member has permission to use modmail commands
- * @param member
+ * @param {Eris.Member} member
  * @returns {boolean}
  */
 function isStaff(member) {
-  if (! config.inboxServerPermission) return true;
+  if (! config.inboxServerRoleIDs.length) return true;
   if (! member) return false;
-  return member.permission.has(config.inboxServerPermission);
+  return member.roles.some((r) => config.inboxServerRoleIDs.includes(r));
 }
 
 /**
  * Returns whether the given message is on the inbox server
- * @param msg
+ * @param {Eris.Message} msg
  * @returns {Promise<boolean>}
  */
 async function messageIsOnInboxServer(msg) {
-  if (! msg.channel.guild) return false;
-  if (msg.channel.guild.id !== (await getInboxGuild()).id) return false;
+  if (! msg.guildID) return false;
+  if (msg.guildID !== (await getInboxGuild()).id) return false;
   return true;
 }
 
 /**
  * Returns whether the given message is on the main server
- * @param msg
+ * @param {Eris.Message} msg
  * @returns {Promise<boolean>}
  */
 async function messageIsOnMainServer(msg) {
-  if (! msg.channel.guild) return false;
-  if (msg.channel.guild.id !== (await getMainGuild()).id) return false;
+  if (! msg.guildID) return false;
+  if (msg.guildID !== (await getMainGuild()).id) return false;
   return true;
 }
 
@@ -126,6 +145,8 @@ async function formatAttachment(attachment) {
  * @returns {String|null}
  */
 function getUserMention(str) {
+  if (! str) return null;
+
   str = str.trim();
 
   if (str.match(/^[0-9]+$/)) {
@@ -246,11 +267,16 @@ function getInboxMention() {
   else return `<@&${config.mentionRole}> `;
 }
 
+/**
+ * @param {Eris.GuildTextableChannel} channel
+ * @param {import('./data/Thread')} thread
+ * @param {Eris.MessageContent} text
+ */
 function postSystemMessageWithFallback(channel, thread, text) {
   if (thread) {
     thread.postSystemMessage(text);
   } else {
-    channel.createMessage(text);
+    bot.createMessage(channel.id, text);
   }
 }
 
@@ -295,6 +321,7 @@ module.exports = {
   postLog,
   handleError,
 
+  isAdmin,
   isStaff,
   messageIsOnInboxServer,
   messageIsOnMainServer,
@@ -316,5 +343,5 @@ module.exports = {
   setDataModelProps,
 
   regEscape,
-  discordURL,
+  discordURL
 };
