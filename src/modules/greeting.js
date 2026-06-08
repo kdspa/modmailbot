@@ -1,30 +1,37 @@
-const path = require('path');
-const fs = require('fs');
-const config = require('../config');
+const path = require("path");
+const fs = require("fs");
+const config = require("../cfg");
+const utils = require("../utils");
 
-module.exports = bot => {
+module.exports = ({ bot }) => {
   if (! config.enableGreeting) return;
 
-  const greetingGuildId = config.mainGuildId || config.greetingGuildId;
+  bot.on("guildMemberAdd", (guild, member) => {
+    const serverGreeting = config.serverGreetings[guild.id];
+    if (! serverGreeting || (! serverGreeting.message && ! serverGreeting.attachment)) return;
 
-  bot.on('guildMemberAdd', (guild, member) => {
-    if (guild.id !== greetingGuildId) return;
-
-    function sendGreeting(file) {
+    function sendGreeting(message, file) {
       bot.getDMChannel(member.id).then(channel => {
         if (! channel) return;
-        channel.createMessage(config.greetingMessage || '', file);
+
+        channel.createMessage(message || "", file)
+          .catch(e => {
+            if (e.code === 50007) return;
+            throw e;
+          });
       });
     }
 
-    if (config.greetingAttachment) {
-      const filename = path.basename(config.greetingAttachment);
-      fs.readFile(config.greetingAttachment, (err, data) => {
+    const greetingMessage = utils.readMultilineConfigValue(serverGreeting.message);
+
+    if (serverGreeting.attachment) {
+      const filename = path.basename(serverGreeting.attachment);
+      fs.readFile(serverGreeting.attachment, (err, data) => {
         const file = {file: data, name: filename};
-        sendGreeting(file);
+        sendGreeting(greetingMessage, file);
       });
     } else {
-      sendGreeting();
+      sendGreeting(greetingMessage);
     }
   });
 };
