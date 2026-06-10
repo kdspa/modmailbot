@@ -11,6 +11,8 @@ const attachments = require("../data/attachments");
 const { formatters } = require("../formatters");
 const { summariseEmbedsAsText } = require("../embedLogging");
 
+const API_ENDPOINT = "https://discord.com/api/v9";
+
 function notfound(res) {
   res.status(404).send("Page Not Found");
 }
@@ -66,13 +68,79 @@ function serveAttachments(req, res) {
     const read = fs.createReadStream(attachmentPath);
     read.pipe(res);
   })
-}
+};
+
+function decodeJwt(token) {
+  return jwt.verify(token, config.jwtSecret);
+};
+
+async function createThread(req, res) {
+  let payload;
+  res.set("Content-Security-Policy", "script-src 'nonce-hawky'")
+
+  if (req.method !== "POST") {
+    res.status(405);
+    return;
+  };
+
+  if (req.method !== "GET") {
+    res.status(405);
+    return;
+  };
+
+  if (req.query.token !== undefined) {
+    const meta = decodeJwt(req.query.token);
+  }
+
+  const params = new URLSearchParams(req.body);
+  payload = {
+    token: params.get("token") || undefined
+  };
+
+  if (payload.content !== undefined && token !== undefined) {
+    const ctx = decodeJwt(payload.token);
+    const meta = {
+      user: ctx.user,
+      category: ctx.category,
+      content: ctx.content.slice(0, 2048)
+    };
+
+    const url = new URL("/threads/create", config.url);
+    const options = {
+      categoryId: category
+    }
+
+    threads.createNewThreadForUser(meta.user, options).then(thread => {
+      const botUser = bot.guilds.get(config.mailGuildId).members.get(bot.user.id);
+      thread._postToThreadChannel(meta.content).then(msg => msg.pin());
+    });
+
+    const result = await fetch(`${API_ENDPOINT}/channels/${encodeURIComponent(config.appealLog)}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bot ${config.token}`
+      },
+      body: JSON.stringify({ meta })
+    });
+
+    if (result.ok) { 
+      res.status(303)
+      return;
+    } else {
+        console.log(await result.json());
+        throw new Error("Failed to submit message");
+    }
+  };
+  res.status(400);
+};
 
 const server = express();
 server.use(helmet());
 
 server.get("/logs/:threadId", serveLogs);
 server.get("/attachments/:attachmentId/:filename", serveAttachments);
+server.get("/threads/create", createThread)
 
 server.on("error", err => {
   console.log("[WARN] Web server error:", err.message);
